@@ -31,6 +31,7 @@ INTERVALS = ['15m', '1h', '4h']
 
 BINANCE_SPOT    = 'https://api.binance.com'
 BINANCE_FUTURES = 'https://fapi.binance.com'
+BINANCE_SPOT    = 'https://api.binance.com'
 COINBASE_API    = 'https://api.exchange.coinbase.com'
 
 # Coinbase sembol eşleştirme

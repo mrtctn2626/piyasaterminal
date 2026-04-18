@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kripto Likidасyon Terminali
-Binance + Coinbase API - Ucretsiz
+Kripto Terminali
+CoinGecko + Binance API - Ucretsiz
 """
 
 import os
@@ -20,17 +20,27 @@ from plotly.subplots import make_subplots
 COINS     = ['BTC', 'ETH', 'SOL', 'XRP', 'AVAX', 'TAO']
 INTERVALS = ['15m', '1h', '4h']
 
-BINANCE_SPOT    = 'https://api.binance.com'
 BINANCE_FUTURES = 'https://fapi.binance.com'
+BINANCE_SPOT    = 'https://api.binance.com'
 COINBASE_API    = 'https://api.exchange.coinbase.com'
+COINGECKO_API   = 'https://api.coingecko.com/api/v3'
+
+COIN_IDS = {
+    'BTC':  'bitcoin',
+    'ETH':  'ethereum',
+    'SOL':  'solana',
+    'XRP':  'ripple',
+    'AVAX': 'avalanche-2',
+    'TAO':  'bittensor',
+}
 
 CB_SYMBOLS = {
     'BTC': 'BTC-USD', 'ETH': 'ETH-USD', 'SOL': 'SOL-USD',
     'XRP': 'XRP-USD', 'AVAX': 'AVAX-USD', 'TAO': 'TAO-USD',
-    'BNB': 'BNB-USD', 'DOGE': 'DOGE-USD',
 }
 
-CB_GRAN = {'15m': 900, '1h': 3600, '4h': 21600}
+CB_GRAN   = {'15m': 900, '1h': 3600, '4h': 21600}
+DAYS_MAP  = {'15m': 1,   '1h': 7,    '4h': 30}
 
 HEATMAP_SCALE = [
     [0.00, 'rgb(10,40,15)'],
@@ -57,39 +67,52 @@ BLUE    = '#60a5fa'
 # ─────────────────────────────────────────────────────
 def get(url, params=None):
     try:
-        r = requests.get(url, params=params, timeout=12)
+        r = requests.get(url, params=params, timeout=15)
         return r.json() if r.status_code == 200 else []
     except Exception:
         return []
 
 
-def fetch_klines(symbol, interval, limit=150):
-    data = get(f'{BINANCE_SPOT}/api/v3/klines',
-               {'symbol': symbol, 'interval': interval, 'limit': limit})
+def fetch_klines(coin, interval, limit=150):
+    """CoinGecko OHLC verisi - her yerden erisilebilir"""
+    coin_id = COIN_IDS.get(coin, 'bitcoin')
+    days    = DAYS_MAP.get(interval, 7)
+    data    = get(f'{COINGECKO_API}/coins/{coin_id}/ohlc',
+                  {'vs_currency': 'usd', 'days': days})
     if not isinstance(data, list) or not data:
-        raise RuntimeError(f'{symbol} icin veri alinamadi')
-    return [{'time': d[0], 'open': float(d[1]), 'high': float(d[2]),
-             'low': float(d[3]), 'close': float(d[4]), 'volume': float(d[5])}
-            for d in data]
+        raise RuntimeError(f'{coin} icin veri alinamadi')
+    return [{'time':   d[0],
+             'open':   float(d[1]),
+             'high':   float(d[2]),
+             'low':    float(d[3]),
+             'close':  float(d[4]),
+             'volume': 0.0}
+            for d in data[-limit:]]
 
 
-def fetch_funding(symbol):
+def fetch_funding(coin):
+    """Binance Futures fonlama orani"""
+    symbol = coin + 'USDT'
     return get(f'{BINANCE_FUTURES}/fapi/v1/fundingRate',
                {'symbol': symbol, 'limit': 100})
 
 
-def fetch_ls(symbol, interval):
+def fetch_ls(coin, interval):
+    """Global long/short orani"""
+    symbol = coin + 'USDT'
     return get(f'{BINANCE_FUTURES}/futures/data/globalLongShortAccountRatio',
                {'symbol': symbol, 'period': interval, 'limit': 100})
 
 
-def fetch_spot_cvd(symbol, interval, limit=150):
-    data = get(f'{BINANCE_SPOT}/api/v3/klines',
-               {'symbol': symbol, 'interval': interval, 'limit': limit})
+def fetch_spot_cvd(coin, interval, limit=150):
+    """Binance Spot CVD"""
+    symbol = coin + 'USDT'
+    data   = get(f'{BINANCE_SPOT}/api/v3/klines',
+                 {'symbol': symbol, 'interval': interval, 'limit': limit})
     if not data:
         return []
     result = []
-    cvd = 0.0
+    cvd    = 0.0
     for d in data:
         total_vol = float(d[5])
         taker_buy = float(d[9])
@@ -103,18 +126,16 @@ def fetch_spot_cvd(symbol, interval, limit=150):
     return result
 
 
-def fetch_coinbase_premium(symbol, interval, limit=150):
-    coin      = symbol.replace('USDT', '')
-    cb_symbol = CB_SYMBOLS.get(coin)
+def fetch_coinbase_premium(coin, interval, limit=150):
+    """Coinbase - Binance fiyat farki"""
+    cb_symbol   = CB_SYMBOLS.get(coin)
+    granularity = CB_GRAN.get(interval, 3600)
     if not cb_symbol:
         return []
-    granularity = CB_GRAN.get(interval, 3600)
     try:
         cb_r = requests.get(
             f'{COINBASE_API}/products/{cb_symbol}/candles',
-            params={'granularity': granularity},
-            timeout=12
-        )
+            params={'granularity': granularity}, timeout=12)
         if cb_r.status_code != 200:
             return []
         cb_candles = cb_r.json()
@@ -122,7 +143,7 @@ def fetch_coinbase_premium(symbol, interval, limit=150):
             return []
         cb_candles.sort(key=lambda x: x[0])
         bn_data = get(f'{BINANCE_SPOT}/api/v3/klines',
-                      {'symbol': symbol, 'interval': interval, 'limit': limit})
+                      {'symbol': coin + 'USDT', 'interval': interval, 'limit': limit})
         if not bn_data:
             return []
         bn_map = {int(d[0] // 1000): float(d[4]) for d in bn_data}
@@ -155,15 +176,14 @@ def build_heatmap(klines, n_buckets=220):
         return int(np.clip((p - p_min) / p_rng * n_buckets, 0, n_buckets - 1))
 
     for xi, k in enumerate(klines):
-        y_lo = buck(k['low'])
-        y_hi = buck(k['high'])
+        y_lo = buck(k['low']);  y_hi = buck(k['high'])
         grid[y_lo:y_hi + 1, xi] += 1.0
         b_lo = buck(min(k['open'], k['close']))
         b_hi = buck(max(k['open'], k['close']))
         if b_hi >= b_lo:
             grid[b_lo:b_hi + 1, xi] += 1.5
 
-    window = min(30, n_x // 4)
+    window = min(30, max(1, n_x // 4))
     cumul  = np.zeros_like(grid)
     for xi in range(n_x):
         cumul[:, xi] = grid[:, max(0, xi - window + 1):xi + 1].sum(axis=1)
@@ -185,10 +205,8 @@ def anno(text, x, y):
 
 
 def build_figure(coin, interval):
-    symbol = coin + 'USDT'
-
     try:
-        klines = fetch_klines(symbol, interval)
+        klines = fetch_klines(coin, interval)
     except RuntimeError as e:
         fig = go.Figure()
         fig.add_annotation(text=str(e), x=0.5, y=0.5, showarrow=False,
@@ -196,10 +214,10 @@ def build_figure(coin, interval):
         fig.update_layout(paper_bgcolor=BG, plot_bgcolor=BG_PLOT, height=800)
         return fig
 
-    fr_data  = fetch_funding(symbol)
-    ls_data  = fetch_ls(symbol, interval)
-    cvd_data = fetch_spot_cvd(symbol, interval)
-    cb_data  = fetch_coinbase_premium(symbol, interval)
+    fr_data  = fetch_funding(coin)
+    ls_data  = fetch_ls(coin, interval)
+    cvd_data = fetch_spot_cvd(coin, interval)
+    cb_data  = fetch_coinbase_premium(coin, interval)
 
     grid, prices, p_min, p_max = build_heatmap(klines)
     times  = [datetime.fromtimestamp(k['time'] / 1000) for k in klines]
@@ -209,11 +227,7 @@ def build_figure(coin, interval):
         rows=3, cols=2,
         row_heights=[0.50, 0.18, 0.32],
         column_widths=[0.5, 0.5],
-        specs=[
-            [{'colspan': 2}, None],
-            [{}, {}],
-            [{}, {}],
-        ],
+        specs=[[{'colspan': 2}, None], [{}, {}], [{}, {}]],
         vertical_spacing=0.05,
         horizontal_spacing=0.06,
     )
@@ -223,12 +237,11 @@ def build_figure(coin, interval):
         x=times, y=prices, z=grid,
         colorscale=HEATMAP_SCALE,
         showscale=False, zmin=0, zmax=1, opacity=0.95,
-        hovertemplate='Fiyat: %{y:,.4f}<br>Yogunluk: %{z:.2f}<extra></extra>',
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
         x=times, y=closes, mode='lines',
-        line=dict(color='rgba(255,255,255,0.75)', width=1.5),
+        line=dict(color='rgba(255,255,255,0.8)', width=1.5),
         showlegend=False,
     ), row=1, col=1)
 
@@ -250,7 +263,6 @@ def build_figure(coin, interval):
             x=fr_times, y=fr_rates,
             marker_color=[GREEN if r >= 0 else RED for r in fr_rates],
             marker_opacity=0.8, showlegend=False,
-            hovertemplate='%{x|%d/%m}<br><b>%{y:.4f}%</b><extra></extra>',
         ), row=2, col=1)
         fig.add_hline(y=0, line=dict(color='rgba(255,255,255,0.15)', width=1), row=2, col=1)
 
@@ -265,7 +277,6 @@ def build_figure(coin, interval):
             line=dict(color=GREEN, width=1.5),
             fill='tozeroy', fillcolor='rgba(34,197,94,0.15)',
             showlegend=False,
-            hovertemplate='Long: <b>%{y:.1f}%</b><extra></extra>',
         ), row=2, col=2)
 
         fig.add_trace(go.Scatter(
@@ -279,10 +290,20 @@ def build_figure(coin, interval):
             line=dict(color=RED, width=1.5),
             fill='tonexty', fillcolor='rgba(239,68,68,0.15)',
             showlegend=False,
-            hovertemplate='Short: <b>%{y:.1f}%</b><extra></extra>',
         ), row=2, col=2)
 
         fig.add_hline(y=50, line=dict(dash='dot', color='rgba(255,255,255,0.15)', width=1), row=2, col=2)
+
+        cur_long  = long_pcts[-1]
+        cur_short = short_pcts[-1]
+        fig.add_annotation(xref='paper', yref='y4', x=0.99, y=cur_long / 2,
+                           text=f'<b>{cur_long:.1f}%</b> Long',
+                           showarrow=False, xanchor='right',
+                           font=dict(color=GREEN, size=10, family='monospace'))
+        fig.add_annotation(xref='paper', yref='y4', x=0.99, y=cur_long + cur_short / 2,
+                           text=f'<b>{cur_short:.1f}%</b> Short',
+                           showarrow=False, xanchor='right',
+                           font=dict(color=RED, size=10, family='monospace'))
 
     # CVD
     if cvd_data:
@@ -294,14 +315,12 @@ def build_figure(coin, interval):
             x=cvd_times, y=delta_vals,
             marker_color=[GREEN if d >= 0 else RED for d in delta_vals],
             marker_opacity=0.5, showlegend=False,
-            hovertemplate='Delta: <b>%{y:,.0f}</b><extra></extra>',
         ), row=3, col=1)
 
         fig.add_trace(go.Scatter(
             x=cvd_times, y=cvd_values, mode='lines',
             line=dict(color=BLUE, width=1.8),
             showlegend=False,
-            hovertemplate='CVD: <b>%{y:,.0f}</b><extra></extra>',
         ), row=3, col=1)
 
         fig.add_hline(y=0, line=dict(color='rgba(255,255,255,0.15)', width=1), row=3, col=1)
@@ -310,23 +329,17 @@ def build_figure(coin, interval):
     if cb_data:
         cb_times    = [datetime.fromtimestamp(d['time'] / 1000) for d in cb_data]
         cb_premiums = [d['premium'] for d in cb_data]
-
         fig.add_trace(go.Bar(
             x=cb_times, y=cb_premiums,
             marker_color=[GREEN if p >= 0 else RED for p in cb_premiums],
             marker_opacity=0.75, showlegend=False,
-            hovertemplate='Premium: <b>%{y:.4f}%</b><extra></extra>',
         ), row=3, col=2)
-
         fig.add_hline(y=0, line=dict(color='rgba(255,255,255,0.15)', width=1), row=3, col=2)
     else:
-        fig.add_annotation(
-            xref='paper', yref='paper',
-            x=0.75, y=0.13,
-            text='Coinbase verisi bu coin icin mevcut degil',
-            showarrow=False, xanchor='center',
-            font=dict(size=10, color=MUTED, family='monospace'),
-        )
+        fig.add_annotation(xref='paper', yref='paper', x=0.75, y=0.13,
+                           text='Coinbase verisi mevcut degil',
+                           showarrow=False, xanchor='center',
+                           font=dict(size=10, color=MUTED, family='monospace'))
 
     # Baslik
     prev      = closes[-2] if len(closes) > 1 else last_price
@@ -354,18 +367,14 @@ def build_figure(coin, interval):
         f' | Fon <span style="color:{fr_col}">{last_fr:+.4f}%</span>'
         f' | L/S <span style="color:{ls_col}">{last_ls:.3f}</span>'
         f' | Long <span style="color:{GREEN}">{last_long:.1f}%</span>'
-        f' Short <span style="color:{RED}">{100-last_long:.1f}%</span>'
+        f' Short <span style="color:{RED}">{100 - last_long:.1f}%</span>'
         f' | CVD <span style="color:{c_col}">{last_cvd:+,.0f}</span>'
         f'{prem_part}'
     )
 
-    ax = dict(
-        gridcolor='rgba(255,255,255,0.05)',
-        zerolinecolor='rgba(255,255,255,0.08)',
-        color=MUTED,
-        tickfont=dict(size=9, family='monospace'),
-        showgrid=True,
-    )
+    ax = dict(gridcolor='rgba(255,255,255,0.05)',
+              zerolinecolor='rgba(255,255,255,0.08)',
+              color=MUTED, tickfont=dict(size=9, family='monospace'), showgrid=True)
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=12), x=0.01, y=0.99),
@@ -376,18 +385,17 @@ def build_figure(coin, interval):
         uirevision=f'{coin}_{interval}',
         bargap=0.1,
         annotations=[
-            anno('FIYAT YOGUNLUK ISI HARITASI  -  Kirmizi: yogun  Sari: orta  Yesil: seyrek', 0.01, 0.995),
+            anno('FIYAT YOGUNLUK ISI HARITASI - Kirmizi:yogun Sari:orta Yesil:seyrek', 0.01, 0.995),
             anno('FON ORANI', 0.01, 0.475),
-            anno('LONG / SHORT  -  Yesil: Long%  Kirmizi: Short%', 0.52, 0.475),
-            anno('BINANCE SPOT CVD  -  Cubuk: delta  Cizgi: kumulatif', 0.01, 0.295),
-            anno('COINBASE PREMIUM  -  Yesil: CB>BN  Kirmizi: BN>CB', 0.52, 0.295),
+            anno('LONG / SHORT - Yesil:Long% Kirmizi:Short%', 0.52, 0.475),
+            anno('BINANCE SPOT CVD - Cubuk:delta Cizgi:kumulatif', 0.01, 0.295),
+            anno('COINBASE PREMIUM - Yesil:CB>BN Kirmizi:BN>CB', 0.52, 0.295),
         ],
     )
 
     fig.update_xaxes(ax)
     fig.update_yaxes(ax)
     fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
-
     return fig
 
 
@@ -398,27 +406,19 @@ app = dash.Dash(__name__, title='Kripto Terminal', update_title=None)
 
 
 def lbl(text):
-    return html.Div(text, style={
-        'color': MUTED, 'fontSize': '10px', 'letterSpacing': '0.06em',
-        'marginBottom': '4px', 'fontFamily': 'monospace',
-    })
+    return html.Div(text, style={'color': MUTED, 'fontSize': '10px',
+                                 'marginBottom': '4px', 'fontFamily': 'monospace'})
 
 
 app.layout = html.Div([
 
     html.Div([
-        html.Span('Kripto Terminali  ', style={
-            'color': '#e8eaf0', 'fontFamily': 'monospace',
-            'fontSize': '14px', 'fontWeight': '500',
-        }),
-        html.Span('Binance + Coinbase | Ucretsiz', style={
-            'color': MUTED, 'fontFamily': 'monospace', 'fontSize': '11px',
-        }),
-    ], style={
-        'padding': '10px 16px', 'backgroundColor': '#060810',
-        'borderBottom': f'1px solid {BORDER}',
-        'display': 'flex', 'alignItems': 'center',
-    }),
+        html.Span('Kripto Terminali  ', style={'color': '#e8eaf0', 'fontFamily': 'monospace',
+                                               'fontSize': '14px', 'fontWeight': '500'}),
+        html.Span('CoinGecko + Binance | Ucretsiz', style={'color': MUTED,
+                                                            'fontFamily': 'monospace', 'fontSize': '11px'}),
+    ], style={'padding': '10px 16px', 'backgroundColor': '#060810',
+              'borderBottom': f'1px solid {BORDER}', 'display': 'flex', 'alignItems': 'center'}),
 
     html.Div([
         html.Div([lbl('COIN'), dcc.Dropdown(
@@ -440,35 +440,24 @@ app.layout = html.Div([
             'border': f'1px solid #222850', 'borderRadius': '6px',
             'cursor': 'pointer', 'fontFamily': 'monospace', 'fontSize': '12px',
         })]),
-        html.Div(id='last-update', style={
-            'marginLeft': 'auto', 'color': MUTED,
-            'fontFamily': 'monospace', 'fontSize': '11px', 'alignSelf': 'center',
-        }),
-    ], style={
-        'display': 'flex', 'alignItems': 'flex-end', 'gap': '12px',
-        'padding': '12px 16px', 'backgroundColor': BG_CARD,
-        'borderBottom': f'1px solid {BORDER}',
-    }),
+        html.Div(id='last-update', style={'marginLeft': 'auto', 'color': MUTED,
+                                          'fontFamily': 'monospace', 'fontSize': '11px',
+                                          'alignSelf': 'center'}),
+    ], style={'display': 'flex', 'alignItems': 'flex-end', 'gap': '12px',
+              'padding': '12px 16px', 'backgroundColor': BG_CARD,
+              'borderBottom': f'1px solid {BORDER}'}),
 
-    dcc.Graph(
-        id='main-chart',
-        config={'displayModeBar': True, 'displaylogo': False,
-                'modeBarButtonsToRemove': ['select2d', 'lasso2d']},
-        style={'backgroundColor': BG},
-    ),
+    dcc.Graph(id='main-chart',
+              config={'displayModeBar': True, 'displaylogo': False,
+                      'modeBarButtonsToRemove': ['select2d', 'lasso2d']},
+              style={'backgroundColor': BG}),
 
     dcc.Interval(id='auto-refresh', interval=60_000, n_intervals=0),
 
-    html.Div([
-        html.Span('Kirmizi=Yogun  Sari=Orta  Yesil=Seyrek  |  ',
-                  style={'color': MUTED}),
-        html.Span('CVD yukan = Net alim  |  CB Premium yukan = Kurumsal alim',
-                  style={'color': MUTED}),
-    ], style={
-        'padding': '6px 16px', 'backgroundColor': '#060810',
-        'borderTop': f'1px solid {BORDER}',
-        'fontFamily': 'monospace', 'fontSize': '10px',
-    }),
+    html.Div('Kirmizi=Yogun | Sari=Orta | Yesil=Seyrek | CVD yukari=Net alim | CB Premium yukari=Kurumsal alim',
+             style={'padding': '6px 16px', 'backgroundColor': '#060810',
+                    'borderTop': f'1px solid {BORDER}', 'color': MUTED,
+                    'fontFamily': 'monospace', 'fontSize': '10px'}),
 
 ], style={'backgroundColor': BG, 'minHeight': '100vh'})
 

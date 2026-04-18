@@ -79,7 +79,7 @@ def get(url, params=None):
 
 def fetch_klines(symbol, interval, limit=150):
     """Binance Futures mum verisi"""
-    data = get(f'{BINANCE_FUTURES}/fapi/v1/klines',
+    data = get(f'{BINANCE_SPOT}/api/v3/klines',
                {'symbol': symbol, 'interval': interval, 'limit': limit})
     if not isinstance(data, list) or not data:
         raise RuntimeError(f'{symbol} için veri alınamadı')
